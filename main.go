@@ -196,6 +196,9 @@ func openInputFile() (err error) {
 			s.decCodecContext.SetFramerate(inputFormatContext.GuessFrameRate(is, nil))
 		}
 
+		// Update channel layout
+		s.decCodecContext.SetChannelLayout(astiav.ChannelLayout(channels2Layout(s.decCodecContext.Channels())))
+
 		// Open codec context
 		if err = s.decCodecContext.Open(s.decCodec, nil); err != nil {
 			err = fmt.Errorf("main: opening codec context failed: %w", err)
@@ -240,7 +243,7 @@ func openOutputFile() (err error) {
 		// Get codec id
 		codecID := astiav.CodecIDMpeg4
 		if s.decCodecContext.MediaType() == astiav.MediaTypeAudio {
-			codecID = astiav.CodecIDAac
+			codecID = astiav.CodecIDPcmS16Le
 		}
 
 		// Find encoder
@@ -258,11 +261,21 @@ func openOutputFile() (err error) {
 
 		// Update codec context
 		if s.decCodecContext.MediaType() == astiav.MediaTypeAudio {
+			channelLayout := astiav.ChannelLayout(channels2Layout(s.decCodecContext.Channels()))
 			if v := s.encCodec.ChannelLayouts(); len(v) > 0 {
-				s.encCodecContext.SetChannelLayout(v[0])
-			} else {
-				s.encCodecContext.SetChannelLayout(s.decCodecContext.ChannelLayout())
+				result := false
+				for _, x := range v {
+					if x == channelLayout {
+						result = true
+						break
+					}
+				}
+				if !result {
+					err = errors.New("main: codec not support channel layout " + channelLayout.String())
+					return
+				}
 			}
+			s.encCodecContext.SetChannelLayout(channelLayout)
 			s.encCodecContext.SetChannels(s.decCodecContext.Channels())
 			s.encCodecContext.SetSampleRate(s.decCodecContext.SampleRate())
 			if v := s.encCodec.SampleFormats(); len(v) > 0 {
@@ -503,4 +516,12 @@ func encodeWriteFrame(f *astiav.Frame, s *stream) (err error) {
 		}
 	}
 	return
+}
+
+func channels2Layout(channels int) uint64 {
+	if channels == 1 {
+		return 4
+	} else {
+		return 3
+	}
 }

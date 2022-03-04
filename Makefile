@@ -7,3 +7,6 @@ all:
 
 run:
 	docker run --rm -it cr/nm:$(ver)
+
+local:
+	go build && ./m
