@@ -59,8 +59,8 @@ func main() {
 	})
 
 	supportedEncCodecs = map[string]string{
-		"mp3": "libmp3lame",
 		"wav": "pcm_s16le",
+		"raw": "pcm_s16le",
 	}
 
 	r := setupRouter()
@@ -98,6 +98,14 @@ func setupRouter() *gin.Engine {
 		task.Success = false
 		task.Status = http.StatusOK
 
+		// support only PCM for now
+		if v := supportedEncCodecs[task.MediaType]; v == "" {
+			task.Message = fmt.Sprintf("main: codec not supported: %s", task.MediaType)
+			task.Status = http.StatusUnsupportedMediaType
+			ct.JSON(task.Status, task)
+			return
+		}
+
 		// We use an astikit.Closer to free all resources properly
 		defer c.Close()
 
@@ -110,7 +118,7 @@ func setupRouter() *gin.Engine {
 		}
 
 		// Open output file
-		f, err := ioutil.TempFile("", fmt.Sprintf("transcode_*.%s", strings.ToLower(task.MediaType)))
+		f, err := ioutil.TempFile("", fmt.Sprintf("transcode_*.%s", "wav"))
 		defer os.Remove(f.Name())
 		if err != nil {
 			task.Message = fmt.Sprintf("main: get temp output file failed: %s", err)
@@ -301,8 +309,13 @@ func openInputFile(input string) (err error) {
 }
 
 func openOutputFile(output string, mediaType string, channels int, sampleRate int) (err error) {
+	formatName := ""
+	if strings.ToLower(mediaType) == "raw" {
+		formatName = "data"
+	}
+
 	// Alloc output format context
-	if outputFormatContext, err = astiav.AllocOutputFormatContext(nil, "", output); err != nil {
+	if outputFormatContext, err = astiav.AllocOutputFormatContext(nil, formatName, output); err != nil {
 		err = fmt.Errorf("main: allocating output format context failed: %w", err)
 		return
 	} else if outputFormatContext == nil {
