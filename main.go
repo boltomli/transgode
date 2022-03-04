@@ -60,7 +60,7 @@ func main() {
 	})
 
 	supportedEncCodecs = map[string]string{
-		"mp3": "liblamemp3",
+		"mp3": "libmp3lame",
 		"wav": "pcm_s16le",
 	}
 
@@ -85,18 +85,22 @@ func setupRouter() *gin.Engine {
 			log.Println(task.SampleRate)
 		}
 
+		// default to stereo
 		if task.Channels < 1 {
-			task.Channels = 1
+			task.Channels = 2
 		}
 		if task.Channels > 2 {
 			task.Channels = 2
 		}
-		if task.Channels < 16000 {
-			task.SampleRate = 16000
+
+		// default to 44100
+		if task.SampleRate < 16000 {
+			task.SampleRate = 44100
 		}
-		if task.Channels > 48000 {
+		if task.SampleRate > 48000 {
 			task.SampleRate = 48000
 		}
+
 		task.Success = false
 		task.Status = http.StatusOK
 
