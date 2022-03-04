@@ -2,19 +2,17 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/asticode/go-astiav"
 	"github.com/asticode/go-astikit"
-)
-
-var (
-	input  = flag.String("i", "", "the input path")
-	output = flag.String("o", "", "the output path")
+	"github.com/gin-gonic/gin"
 )
 
 var (
@@ -39,6 +37,21 @@ type stream struct {
 	outputStream      *astiav.Stream
 }
 
+var (
+	supportedEncCodecs = make(map[string]string)
+	contentTypes       = make(map[string]string)
+)
+
+type TranscodeTask struct {
+	AudioUrl   string `form:"audiourl"`
+	MediaType  string `form:"mediatype"`
+	Channels   int    `form:"channels"`
+	SampleRate int    `form:"samplerate"`
+	Success    bool
+	Status     int
+	Message    string `default:""`
+}
+
 func main() {
 	// Handle ffmpeg logs
 	astiav.SetLogLevel(astiav.LogLevelDebug)
@@ -46,101 +59,157 @@ func main() {
 		log.Printf("ffmpeg log: %s (level: %d)\n", strings.TrimSpace(msg), l)
 	})
 
-	// Parse flags
-	flag.Parse()
-
-	// Usage
-	if *input == "" || *output == "" {
-		log.Println("Usage: <binary path> -i <input path> -o <output path>")
-		return
+	supportedEncCodecs = map[string]string{
+		"mp3": "liblamemp3",
+		"wav": "pcm_s16le",
 	}
 
-	// We use an astikit.Closer to free all resources properly
-	defer c.Close()
-
-	// Open input file
-	if err := openInputFile(); err != nil {
-		log.Fatal(fmt.Errorf("main: opening input file failed: %w", err))
+	contentTypes = map[string]string{
+		"mp3": "audio/mpeg",
+		"wav": "audio/wav",
 	}
 
-	// Open output file
-	if err := openOutputFile(); err != nil {
-		log.Fatal(fmt.Errorf("main: opening output file failed: %w", err))
-	}
-
-	// Init filters
-	if err := initFilters(); err != nil {
-		log.Fatal(fmt.Errorf("main: initializing filters failed: %w", err))
-	}
-
-	// Alloc packet
-	pkt := astiav.AllocPacket()
-	c.Add(pkt.Free)
-
-	// Loop through packets
-	for {
-		// Read frame
-		if err := inputFormatContext.ReadFrame(pkt); err != nil {
-			if errors.Is(err, astiav.ErrEof) {
-				break
-			}
-			log.Fatal(fmt.Errorf("main: reading frame failed: %w", err))
-		}
-
-		// Get stream
-		s, ok := streams[pkt.StreamIndex()]
-		if !ok {
-			continue
-		}
-
-		// Update packet
-		pkt.RescaleTs(s.inputStream.TimeBase(), s.decCodecContext.TimeBase())
-
-		// Send packet
-		if err := s.decCodecContext.SendPacket(pkt); err != nil {
-			log.Fatal(fmt.Errorf("main: sending packet failed: %w", err))
-		}
-
-		// Loop
-		for {
-			// Receive frame
-			if err := s.decCodecContext.ReceiveFrame(s.decFrame); err != nil {
-				if errors.Is(err, astiav.ErrEof) || errors.Is(err, astiav.ErrEagain) {
-					break
-				}
-				log.Fatal(fmt.Errorf("main: receiving frame failed: %w", err))
-			}
-
-			// Filter, encode and write frame
-			if err := filterEncodeWriteFrame(s.decFrame, s); err != nil {
-				log.Fatal(fmt.Errorf("main: filtering, encoding and writing frame failed: %w", err))
-			}
-		}
-	}
-
-	// Loop through streams
-	for _, s := range streams {
-		// Flush filter
-		if err := filterEncodeWriteFrame(nil, s); err != nil {
-			log.Fatal(fmt.Errorf("main: filtering, encoding and writing frame failed: %w", err))
-		}
-
-		// Flush encoder
-		if err := encodeWriteFrame(nil, s); err != nil {
-			log.Fatal(fmt.Errorf("main: encoding and writing frame failed: %w", err))
-		}
-	}
-
-	// Write trailer
-	if err := outputFormatContext.WriteTrailer(); err != nil {
-		log.Fatal(fmt.Errorf("main: writing trailer failed: %w", err))
-	}
-
-	// Success
-	log.Println("success")
+	r := setupRouter()
+	r.Run(":8080")
 }
 
-func openInputFile() (err error) {
+func setupRouter() *gin.Engine {
+	r := gin.Default()
+
+	r.POST("/speak/transcode", func(ct *gin.Context) {
+		var task TranscodeTask
+		if ct.ShouldBind(&task) == nil {
+			log.Println(task.AudioUrl)
+			log.Println(task.MediaType)
+			log.Println(task.Channels)
+			log.Println(task.SampleRate)
+		}
+
+		if task.Channels < 1 {
+			task.Channels = 1
+		}
+		if task.Channels > 2 {
+			task.Channels = 2
+		}
+		if task.Channels < 16000 {
+			task.SampleRate = 16000
+		}
+		if task.Channels > 48000 {
+			task.SampleRate = 48000
+		}
+		task.Success = false
+		task.Status = http.StatusOK
+
+		// We use an astikit.Closer to free all resources properly
+		defer c.Close()
+
+		// Open input file
+		if err := openInputFile(task.AudioUrl); err != nil {
+			task.Message = fmt.Sprintf("main: opening input file failed: %s", err)
+			task.Status = http.StatusBadRequest
+			ct.JSON(task.Status, task)
+			return
+		}
+
+		// Open output file
+		f, err := ioutil.TempFile("", "transcode_*")
+		defer os.Remove(f.Name())
+		if err != nil {
+			task.Message = fmt.Sprintf("main: get temp output file failed: %s", err)
+			task.Status = http.StatusBadRequest
+			ct.JSON(task.Status, task)
+			return
+		}
+
+		if err := openOutputFile(f.Name(), strings.ToLower(task.MediaType)); err != nil {
+			task.Message = fmt.Sprintf("main: opening output file failed: %s", err)
+			task.Status = http.StatusBadRequest
+			ct.JSON(task.Status, task)
+			return
+		}
+
+		// Init filters
+		if err := initFilters(); err != nil {
+			task.Message = fmt.Sprintf("main: initializing filters failed: %s", err)
+			task.Status = http.StatusBadRequest
+			ct.JSON(task.Status, task)
+			return
+		}
+
+		// Alloc packet
+		pkt := astiav.AllocPacket()
+		c.Add(pkt.Free)
+
+		// Loop through packets
+		for {
+			// Read frame
+			if err := inputFormatContext.ReadFrame(pkt); err != nil {
+				if errors.Is(err, astiav.ErrEof) {
+					break
+				}
+				task.Message = fmt.Sprintf("main: reading frame failed: %s", err)
+			}
+
+			// Get stream
+			s, ok := streams[pkt.StreamIndex()]
+			if !ok {
+				continue
+			}
+
+			// Update packet
+			pkt.RescaleTs(s.inputStream.TimeBase(), s.decCodecContext.TimeBase())
+
+			// Send packet
+			if err := s.decCodecContext.SendPacket(pkt); err != nil {
+				task.Message = fmt.Sprintf("main: sending packet failed: %s", err)
+			}
+
+			// Loop
+			for {
+				// Receive frame
+				if err := s.decCodecContext.ReceiveFrame(s.decFrame); err != nil {
+					if errors.Is(err, astiav.ErrEof) || errors.Is(err, astiav.ErrEagain) {
+						break
+					}
+					task.Message = fmt.Sprintf("main: receiving frame failed: %s", err)
+				}
+
+				// Filter, encode and write frame
+				if err := filterEncodeWriteFrame(s.decFrame, s); err != nil {
+					task.Message = fmt.Sprintf("main: filtering, encoding and writing frame failed: %s", err)
+				}
+			}
+		}
+
+		// Loop through streams
+		for _, s := range streams {
+			// Flush filter
+			if err := filterEncodeWriteFrame(nil, s); err != nil {
+				task.Message = fmt.Sprintf("main: filtering, encoding and writing frame failed: %s", err)
+			}
+
+			// Flush encoder
+			if err := encodeWriteFrame(nil, s); err != nil {
+				task.Message = fmt.Sprintf("main: encoding and writing frame failed: %s", err)
+			}
+		}
+
+		// Write trailer
+		if err := outputFormatContext.WriteTrailer(); err != nil {
+			task.Message = fmt.Sprintf("main: writing trailer failed: %s", err)
+		}
+
+		// Success
+		task.Success = true
+		task.Message = fmt.Sprintf("Provided format: %s", contentTypes[strings.ToLower(task.MediaType)])
+
+		ct.JSON(task.Status, task)
+	})
+
+	return r
+}
+
+func openInputFile(input string) (err error) {
 	// Alloc input format context
 	if inputFormatContext = astiav.AllocFormatContext(); inputFormatContext == nil {
 		err = errors.New("main: input format context is nil")
@@ -149,7 +218,7 @@ func openInputFile() (err error) {
 	c.Add(inputFormatContext.Free)
 
 	// Open input
-	if err = inputFormatContext.OpenInput(*input, nil, nil); err != nil {
+	if err = inputFormatContext.OpenInput(input, nil, nil); err != nil {
 		err = fmt.Errorf("main: opening input failed: %w", err)
 		return
 	}
@@ -215,9 +284,11 @@ func openInputFile() (err error) {
 	return
 }
 
-func openOutputFile() (err error) {
+func openOutputFile(output string, mediaType string) (err error) {
+	fileName := output + "." + mediaType
+
 	// Alloc output format context
-	if outputFormatContext, err = astiav.AllocOutputFormatContext(nil, "", *output); err != nil {
+	if outputFormatContext, err = astiav.AllocOutputFormatContext(nil, "", fileName); err != nil {
 		err = fmt.Errorf("main: allocating output format context failed: %w", err)
 		return
 	} else if outputFormatContext == nil {
@@ -240,14 +311,19 @@ func openOutputFile() (err error) {
 			return
 		}
 
-		// Get codec id
-		codecID := astiav.CodecIDMpeg4
-		if s.decCodecContext.MediaType() == astiav.MediaTypeAudio {
-			codecID = astiav.CodecIDPcmS16Le
+		// Get codec for audio only
+		if s.decCodecContext.MediaType() != astiav.MediaTypeAudio {
+			err = errors.New("main: codec is not audio")
+			return
+		}
+
+		encCodec := mediaType
+		if v := supportedEncCodecs[mediaType]; v != "" {
+			encCodec = v
 		}
 
 		// Find encoder
-		if s.encCodec = astiav.FindEncoder(codecID); s.encCodec == nil {
+		if s.encCodec = astiav.FindEncoderByName(encCodec); s.encCodec == nil {
 			err = errors.New("main: codec is nil")
 			return
 		}
@@ -323,7 +399,7 @@ func openOutputFile() (err error) {
 		ioContext := astiav.NewIOContext()
 
 		// Open io context
-		if err = ioContext.Open(*output, astiav.NewIOContextFlags(astiav.IOContextFlagWrite)); err != nil {
+		if err = ioContext.Open(output, astiav.NewIOContextFlags(astiav.IOContextFlagWrite)); err != nil {
 			err = fmt.Errorf("main: opening io context failed: %w", err)
 			return
 		}
