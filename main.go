@@ -12,7 +12,7 @@ import (
 
 	"github.com/asticode/go-astiav"
 	"github.com/asticode/go-astikit"
-	"github.com/gin-gonic/gin"
+	"github.com/gofiber/fiber/v2"
 )
 
 var (
@@ -63,20 +63,14 @@ func main() {
 		"raw": "pcm_s16le",
 	}
 
-	r := setupRouter()
-	r.Run(":8080")
-}
+	app := fiber.New()
+	app.Post("/speak/transcode", func(ct *fiber.Ctx) error {
+		task := new(TranscodeTask)
 
-func setupRouter() *gin.Engine {
-	r := gin.Default()
-
-	r.POST("/speak/transcode", func(ct *gin.Context) {
-		var task TranscodeTask
-		if ct.ShouldBind(&task) == nil {
-			log.Println(task.AudioUrl)
-			log.Println(task.MediaType)
-			log.Println(task.Channels)
-			log.Println(task.SampleRate)
+		if err := ct.BodyParser(task); err != nil {
+			return ct.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"message": err.Error(),
+			})
 		}
 
 		// default to stereo
@@ -102,8 +96,7 @@ func setupRouter() *gin.Engine {
 		if v := supportedEncCodecs[task.MediaType]; v == "" {
 			task.Message = fmt.Sprintf("main: codec not supported: %s", task.MediaType)
 			task.Status = http.StatusUnsupportedMediaType
-			ct.JSON(task.Status, task)
-			return
+			return ct.JSON(task)
 		}
 
 		// We use an astikit.Closer to free all resources properly
@@ -113,8 +106,7 @@ func setupRouter() *gin.Engine {
 		if err := openInputFile(task.AudioUrl); err != nil {
 			task.Message = fmt.Sprintf("main: opening input file failed: %s", err)
 			task.Status = http.StatusBadRequest
-			ct.JSON(task.Status, task)
-			return
+			return ct.JSON(task)
 		}
 
 		// Open output file
@@ -123,23 +115,20 @@ func setupRouter() *gin.Engine {
 		if err != nil {
 			task.Message = fmt.Sprintf("main: get temp output file failed: %s", err)
 			task.Status = http.StatusBadRequest
-			ct.JSON(task.Status, task)
-			return
+			return ct.JSON(task)
 		}
 
 		if err := openOutputFile(f.Name(), strings.ToLower(task.MediaType), task.Channels, task.SampleRate); err != nil {
 			task.Message = fmt.Sprintf("main: opening output file failed: %s", err)
 			task.Status = http.StatusBadRequest
-			ct.JSON(task.Status, task)
-			return
+			return ct.JSON(task)
 		}
 
 		// Init filters
 		if err := initFilters(); err != nil {
 			task.Message = fmt.Sprintf("main: initializing filters failed: %s", err)
 			task.Status = http.StatusBadRequest
-			ct.JSON(task.Status, task)
-			return
+			return ct.JSON(task)
 		}
 
 		// Alloc packet
@@ -155,8 +144,7 @@ func setupRouter() *gin.Engine {
 				}
 				task.Message = fmt.Sprintf("main: reading frame failed: %s", err)
 				task.Status = http.StatusBadRequest
-				ct.JSON(task.Status, task)
-				return
+				return ct.JSON(task)
 			}
 
 			// Get stream
@@ -172,8 +160,7 @@ func setupRouter() *gin.Engine {
 			if err := s.decCodecContext.SendPacket(pkt); err != nil {
 				task.Message = fmt.Sprintf("main: sending packet failed: %s", err)
 				task.Status = http.StatusBadRequest
-				ct.JSON(task.Status, task)
-				return
+				return ct.JSON(task)
 			}
 
 			// Loop
@@ -185,16 +172,14 @@ func setupRouter() *gin.Engine {
 					}
 					task.Message = fmt.Sprintf("main: receiving frame failed: %s", err)
 					task.Status = http.StatusBadRequest
-					ct.JSON(task.Status, task)
-					return
+					return ct.JSON(task)
 				}
 
 				// Filter, encode and write frame
 				if err := filterEncodeWriteFrame(s.decFrame, s); err != nil {
 					task.Message = fmt.Sprintf("main: filtering, encoding and writing frame failed: %s", err)
 					task.Status = http.StatusBadRequest
-					ct.JSON(task.Status, task)
-					return
+					return ct.JSON(task)
 				}
 			}
 		}
@@ -205,16 +190,14 @@ func setupRouter() *gin.Engine {
 			if err := filterEncodeWriteFrame(nil, s); err != nil {
 				task.Message = fmt.Sprintf("main: filtering, encoding and writing frame failed: %s", err)
 				task.Status = http.StatusBadRequest
-				ct.JSON(task.Status, task)
-				return
+				return ct.JSON(task)
 			}
 
 			// Flush encoder
 			if err := encodeWriteFrame(nil, s); err != nil {
 				task.Message = fmt.Sprintf("main: encoding and writing frame failed: %s", err)
 				task.Status = http.StatusBadRequest
-				ct.JSON(task.Status, task)
-				return
+				return ct.JSON(task)
 			}
 		}
 
@@ -222,16 +205,14 @@ func setupRouter() *gin.Engine {
 		if err := outputFormatContext.WriteTrailer(); err != nil {
 			task.Message = fmt.Sprintf("main: writing trailer failed: %s", err)
 			task.Status = http.StatusBadRequest
-			ct.JSON(task.Status, task)
-			return
+			return ct.JSON(task)
 		}
 
 		// Success
 		task.Success = true
-		ct.File(f.Name())
+		return ct.SendFile(f.Name(), true)
 	})
-
-	return r
+	app.Listen(":8080")
 }
 
 func openInputFile(input string) (err error) {
