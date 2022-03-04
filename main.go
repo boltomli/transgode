@@ -39,7 +39,6 @@ type stream struct {
 
 var (
 	supportedEncCodecs = make(map[string]string)
-	contentTypes       = make(map[string]string)
 )
 
 type TranscodeTask struct {
@@ -62,11 +61,6 @@ func main() {
 	supportedEncCodecs = map[string]string{
 		"mp3": "libmp3lame",
 		"wav": "pcm_s16le",
-	}
-
-	contentTypes = map[string]string{
-		"mp3": "audio/mpeg",
-		"wav": "audio/wav",
 	}
 
 	r := setupRouter()
@@ -125,7 +119,7 @@ func setupRouter() *gin.Engine {
 			return
 		}
 
-		if err := openOutputFile(f.Name(), strings.ToLower(task.MediaType)); err != nil {
+		if err := openOutputFile(f.Name(), strings.ToLower(task.MediaType), task.Channels, task.SampleRate); err != nil {
 			task.Message = fmt.Sprintf("main: opening output file failed: %s", err)
 			task.Status = http.StatusBadRequest
 			ct.JSON(task.Status, task)
@@ -255,9 +249,8 @@ func openInputFile(input string) (err error) {
 
 	// Loop through streams
 	for _, is := range inputFormatContext.Streams() {
-		// Only process audio or video
-		if is.CodecParameters().MediaType() != astiav.MediaTypeAudio &&
-			is.CodecParameters().MediaType() != astiav.MediaTypeVideo {
+		// Only process audio
+		if is.CodecParameters().MediaType() != astiav.MediaTypeAudio {
 			continue
 		}
 
@@ -307,7 +300,7 @@ func openInputFile(input string) (err error) {
 	return
 }
 
-func openOutputFile(output string, mediaType string) (err error) {
+func openOutputFile(output string, mediaType string, channels int, sampleRate int) (err error) {
 	// Alloc output format context
 	if outputFormatContext, err = astiav.AllocOutputFormatContext(nil, "", output); err != nil {
 		err = fmt.Errorf("main: allocating output format context failed: %w", err)
@@ -358,7 +351,7 @@ func openOutputFile(output string, mediaType string) (err error) {
 
 		// Update codec context
 		if s.decCodecContext.MediaType() == astiav.MediaTypeAudio {
-			channelLayout := astiav.ChannelLayout(channels2Layout(s.decCodecContext.Channels()))
+			channelLayout := astiav.ChannelLayout(channels2Layout(channels))
 			if v := s.encCodec.ChannelLayouts(); len(v) > 0 {
 				result := false
 				for _, x := range v {
@@ -373,13 +366,23 @@ func openOutputFile(output string, mediaType string) (err error) {
 				}
 			}
 			s.encCodecContext.SetChannelLayout(channelLayout)
-			s.encCodecContext.SetChannels(s.decCodecContext.Channels())
-			s.encCodecContext.SetSampleRate(s.decCodecContext.SampleRate())
+			s.encCodecContext.SetChannels(channels)
+			s.encCodecContext.SetSampleRate(sampleRate)
+
+			sampleFormat := s.decCodecContext.SampleFormat()
 			if v := s.encCodec.SampleFormats(); len(v) > 0 {
-				s.encCodecContext.SetSampleFormat(v[0])
-			} else {
-				s.encCodecContext.SetSampleFormat(s.decCodecContext.SampleFormat())
+				result := false
+				for _, x := range v {
+					if x == sampleFormat {
+						result = true
+						break
+					}
+				}
+				if !result {
+					sampleFormat = v[0]
+				}
 			}
+			s.encCodecContext.SetSampleFormat(sampleFormat)
 			s.encCodecContext.SetTimeBase(s.decCodecContext.TimeBase())
 		} else {
 			s.encCodecContext.SetHeight(s.decCodecContext.Height())
@@ -478,7 +481,7 @@ func initFilters() (err error) {
 			}
 			buffersrc = astiav.FindFilterByName("abuffer")
 			buffersink = astiav.FindFilterByName("abuffersink")
-			content = fmt.Sprintf("aformat=sample_fmts=%s:channel_layouts=%s", s.encCodecContext.SampleFormat().Name(), s.encCodecContext.ChannelLayout().String())
+			content = fmt.Sprintf("aresample=isr=%d:osr=%d:icl=%s:ocl=%s:isf=%s:osf=%s", s.decCodecContext.SampleRate(), s.encCodecContext.SampleRate(), s.decCodecContext.ChannelLayout().String(), s.encCodecContext.ChannelLayout().String(), s.decCodecContext.SampleFormat().Name(), s.encCodecContext.SampleFormat().Name())
 		default:
 			args = astiav.FilterArgs{
 				"pix_fmt":      strconv.Itoa(int(s.decCodecContext.PixelFormat())),
