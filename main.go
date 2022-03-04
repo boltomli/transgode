@@ -116,7 +116,7 @@ func setupRouter() *gin.Engine {
 		}
 
 		// Open output file
-		f, err := ioutil.TempFile("", "transcode_*")
+		f, err := ioutil.TempFile("", fmt.Sprintf("transcode_*.%s", strings.ToLower(task.MediaType)))
 		defer os.Remove(f.Name())
 		if err != nil {
 			task.Message = fmt.Sprintf("main: get temp output file failed: %s", err)
@@ -152,6 +152,9 @@ func setupRouter() *gin.Engine {
 					break
 				}
 				task.Message = fmt.Sprintf("main: reading frame failed: %s", err)
+				task.Status = http.StatusBadRequest
+				ct.JSON(task.Status, task)
+				return
 			}
 
 			// Get stream
@@ -166,6 +169,9 @@ func setupRouter() *gin.Engine {
 			// Send packet
 			if err := s.decCodecContext.SendPacket(pkt); err != nil {
 				task.Message = fmt.Sprintf("main: sending packet failed: %s", err)
+				task.Status = http.StatusBadRequest
+				ct.JSON(task.Status, task)
+				return
 			}
 
 			// Loop
@@ -176,11 +182,17 @@ func setupRouter() *gin.Engine {
 						break
 					}
 					task.Message = fmt.Sprintf("main: receiving frame failed: %s", err)
+					task.Status = http.StatusBadRequest
+					ct.JSON(task.Status, task)
+					return
 				}
 
 				// Filter, encode and write frame
 				if err := filterEncodeWriteFrame(s.decFrame, s); err != nil {
 					task.Message = fmt.Sprintf("main: filtering, encoding and writing frame failed: %s", err)
+					task.Status = http.StatusBadRequest
+					ct.JSON(task.Status, task)
+					return
 				}
 			}
 		}
@@ -190,24 +202,31 @@ func setupRouter() *gin.Engine {
 			// Flush filter
 			if err := filterEncodeWriteFrame(nil, s); err != nil {
 				task.Message = fmt.Sprintf("main: filtering, encoding and writing frame failed: %s", err)
+				task.Status = http.StatusBadRequest
+				ct.JSON(task.Status, task)
+				return
 			}
 
 			// Flush encoder
 			if err := encodeWriteFrame(nil, s); err != nil {
 				task.Message = fmt.Sprintf("main: encoding and writing frame failed: %s", err)
+				task.Status = http.StatusBadRequest
+				ct.JSON(task.Status, task)
+				return
 			}
 		}
 
 		// Write trailer
 		if err := outputFormatContext.WriteTrailer(); err != nil {
 			task.Message = fmt.Sprintf("main: writing trailer failed: %s", err)
+			task.Status = http.StatusBadRequest
+			ct.JSON(task.Status, task)
+			return
 		}
 
 		// Success
 		task.Success = true
-		task.Message = fmt.Sprintf("Provided format: %s", contentTypes[strings.ToLower(task.MediaType)])
-
-		ct.JSON(task.Status, task)
+		ct.File(f.Name())
 	})
 
 	return r
@@ -289,10 +308,8 @@ func openInputFile(input string) (err error) {
 }
 
 func openOutputFile(output string, mediaType string) (err error) {
-	fileName := output + "." + mediaType
-
 	// Alloc output format context
-	if outputFormatContext, err = astiav.AllocOutputFormatContext(nil, "", fileName); err != nil {
+	if outputFormatContext, err = astiav.AllocOutputFormatContext(nil, "", output); err != nil {
 		err = fmt.Errorf("main: allocating output format context failed: %w", err)
 		return
 	} else if outputFormatContext == nil {
@@ -600,8 +617,10 @@ func encodeWriteFrame(f *astiav.Frame, s *stream) (err error) {
 
 func channels2Layout(channels int) uint64 {
 	if channels == 1 {
+		// mono (0x4)
 		return 4
 	} else {
+		// left (0x1) + right (0x2)
 		return 3
 	}
 }
