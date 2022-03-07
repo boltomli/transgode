@@ -30,7 +30,7 @@ github.com/gofiber/fiber/v2/internal/msgp
 github.com/gofiber/fiber/v2/internal/schema
 github.com/gofiber/fiber/v2/internal/uuid
 github.com/gofiber/fiber/v2/utils
-# github.com/klauspost/compress v1.14.4
+# github.com/klauspost/compress v1.15.0
 ## explicit; go 1.15
 github.com/klauspost/compress/flate
 github.com/klauspost/compress/gzip
